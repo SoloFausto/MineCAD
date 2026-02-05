@@ -1,0 +1,20 @@
+{
+  "stats": {
+    "minecraft:used": {
+      "minecad:blueprint_tool": 8
+    },
+    "minecraft:custom": {
+      "minecraft:time_since_rest": 16071,
+      "minecraft:walk_one_cm": 39,
+      "minecraft:total_world_time": 18176,
+      "minecraft:leave_game": 1,
+      "minecraft:fly_one_cm": 21188,
+      "minecraft:crouch_one_cm": 41,
+      "minecraft:sneak_time": 147,
+      "minecraft:play_time": 16071,
+      "minecraft:jump": 1,
+      "minecraft:time_since_death": 16071
+    }
+  },
+  "DataVersion": 4671
+}

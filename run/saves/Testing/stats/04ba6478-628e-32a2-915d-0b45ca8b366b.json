@@ -1,0 +1,20 @@
+{
+  "stats": {
+    "minecraft:dropped": {
+      "minecad:blueprint_tool": 1
+    },
+    "minecraft:custom": {
+      "minecraft:time_since_rest": 1661,
+      "minecraft:total_world_time": 2363,
+      "minecraft:fly_one_cm": 6661,
+      "minecraft:sneak_time": 27,
+      "minecraft:play_time": 1661,
+      "minecraft:time_since_death": 1661,
+      "minecraft:drop": 1
+    },
+    "minecraft:used": {
+      "minecad:blueprint_tool": 2
+    }
+  },
+  "DataVersion": 4671
+}

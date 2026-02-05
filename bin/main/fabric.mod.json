@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "minecad",
+  "version": "${version}",
+  "name": "MineCAD",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "icon": "assets/minecad/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-datagen": [
+      "org.solofausto.minecad.client.MinecadDataGenerator"
+    ],
+    "client": [
+      "org.solofausto.minecad.client.MinecadClient"
+    ],
+    "main": [
+      "org.solofausto.minecad.Minecad"
+    ]
+  },
+  "mixins": [
+    "minecad.mixins.json",
+    {
+      "config": "minecad.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
