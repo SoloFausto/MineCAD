@@ -14,13 +14,17 @@ import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.item.ItemStack;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.joml.Matrix4f;
 import org.solofausto.minecad.blueprint.BlueprintGeometry;
 import org.solofausto.minecad.blueprint.BlueprintItemData;
 import org.solofausto.minecad.blueprint.BlueprintManager;
 import org.solofausto.minecad.blueprint.BlueprintLine;
+import org.solofausto.minecad.blueprint.BlueprintPoint;
 import org.solofausto.minecad.blueprint.BlueprintSession;
 import org.solofausto.minecad.Minecad;
 
@@ -28,7 +32,11 @@ public abstract class SketchToolBase {
     private static final float TARGET_ALPHA = 0.7f;
     private static final float POINT_ALPHA = 0.75f;
     private static final float LINE_ALPHA = 0.65f;
+    private static final float REGION_ALPHA = 0.85f;
     private static final double TARGET_OFFSET = 0.003;
+    private static final long BLINK_PERIOD_MS = 360L;
+
+    private static int lastHoveredRegionIndex = -1;
 
     protected SketchToolBase() {
     }
@@ -70,11 +78,13 @@ public abstract class SketchToolBase {
             return;
         }
 
-        renderPoints(context, session, cameraPos);
-        renderLines(context, session, cameraPos);
+        double maxDistanceSq = getRenderDistanceSq();
+        renderPoints(context, session, cameraPos, maxDistanceSq);
+        renderLines(context, session, cameraPos, maxDistanceSq);
 
         BlockPos targetPos = BlockPos.ofFloored(hit);
-        renderTargetBlock(context, targetPos);
+        renderRegions(context, session, cameraPos, targetPos, maxDistanceSq);
+        renderTargetBlock(context, targetPos, maxDistanceSq);
     }
 
     private static boolean isHoldingSketchTool(MinecraftClient client) {
@@ -133,9 +143,12 @@ public abstract class SketchToolBase {
         return blueprintId.equals(stackId);
     }
 
-    private static void renderTargetBlock(WorldRenderContext context, BlockPos targetPos) {
+    private static void renderTargetBlock(WorldRenderContext context, BlockPos targetPos, double maxDistanceSq) {
         MatrixStack matrices = context.matrices();
         Vec3d cameraPos = clientCameraPos();
+        if (cameraPos.squaredDistanceTo(Vec3d.ofCenter(targetPos)) > maxDistanceSq) {
+            return;
+        }
         Matrix4f matrix = matrices.peek().getPositionMatrix();
         BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS,
                 VertexFormats.POSITION_COLOR);
@@ -158,7 +171,8 @@ public abstract class SketchToolBase {
         }
     }
 
-    private static void renderPoints(WorldRenderContext context, BlueprintSession session, Vec3d cameraPos) {
+    private static void renderPoints(WorldRenderContext context, BlueprintSession session, Vec3d cameraPos,
+            double maxDistanceSq) {
         if (session.getPoints().isEmpty()) {
             return;
         }
@@ -168,11 +182,21 @@ public abstract class SketchToolBase {
         BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS,
                 VertexFormats.POSITION_COLOR);
         int alpha = Math.round(255 * POINT_ALPHA);
+        boolean emitted = false;
 
-        for (var point : session.getPoints()) {
+        List<BlueprintPoint> points = new ArrayList<>(session.getPoints());
+        for (var point : points) {
             Vec3d world = BlueprintGeometry.toWorldCoords(point, session.getOrigin());
+            if (cameraPos.squaredDistanceTo(world) > maxDistanceSq) {
+                continue;
+            }
             BlockPos pos = BlockPos.ofFloored(world);
             emitCube(buffer, matrix, pos, cameraPos, alpha, 0, 120, 255);
+            emitted = true;
+        }
+
+        if (!emitted) {
+            return;
         }
 
         BuiltBuffer built = buffer.end();
@@ -180,7 +204,8 @@ public abstract class SketchToolBase {
         built.close();
     }
 
-    private static void renderLines(WorldRenderContext context, BlueprintSession session, Vec3d cameraPos) {
+    private static void renderLines(WorldRenderContext context, BlueprintSession session, Vec3d cameraPos,
+            double maxDistanceSq) {
         if (session.getLines().isEmpty()) {
             return;
         }
@@ -190,21 +215,89 @@ public abstract class SketchToolBase {
         BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS,
                 VertexFormats.POSITION_COLOR);
         int alpha = Math.round(255 * LINE_ALPHA);
+        boolean emitted = false;
 
-        for (BlueprintLine line : session.getLines()) {
+        List<BlueprintLine> lines = new ArrayList<>(session.getLines());
+        for (BlueprintLine line : lines) {
             Vec3d startWorld = BlueprintGeometry.toWorldCoords(line.start(), session.getOrigin());
             Vec3d endWorld = BlueprintGeometry.toWorldCoords(line.end(), session.getOrigin());
             BlockPos start = BlockPos.ofFloored(startWorld);
             BlockPos end = BlockPos.ofFloored(endWorld);
             for (BlockPos pos : getLineBlocks(start, end)) {
+                if (cameraPos.squaredDistanceTo(Vec3d.ofCenter(pos)) > maxDistanceSq) {
+                    continue;
+                }
                 emitCube(buffer, matrix, pos, cameraPos, alpha, 0, 255, 0);
+                emitted = true;
             }
+        }
+
+        if (!emitted) {
+            return;
         }
 
         BuiltBuffer built = buffer.end();
         RenderLayers.debugQuads().draw(built);
         built.close();
     }
+
+    private static void renderRegions(WorldRenderContext context, BlueprintSession session, Vec3d cameraPos,
+            BlockPos targetPos, double maxDistanceSq) {
+        if (session.getLines().isEmpty() || session.getOrigin() == null) {
+            return;
+        }
+
+        List<Region> regions = detectRegions(session);
+        if (regions.isEmpty()) {
+            return;
+        }
+
+        PlanePos targetPlane = worldToPlaneCoords(targetPos, session.getOrigin());
+        int hoveredIndex = -1;
+        for (int i = 0; i < regions.size(); i++) {
+            if (regions.get(i).planeCells.contains(targetPlane)) {
+                hoveredIndex = i;
+                break;
+            }
+        }
+
+        if (hoveredIndex < 0) {
+            lastHoveredRegionIndex = -1;
+            return;
+        }
+
+        lastHoveredRegionIndex = hoveredIndex;
+        Region region = regions.get(hoveredIndex);
+        float blink = blinkFactor();
+        int alpha = Math.round(255 * REGION_ALPHA * blink);
+        if (alpha <= 0) {
+            return;
+        }
+
+        MatrixStack matrices = context.matrices();
+        Matrix4f matrix = matrices.peek().getPositionMatrix();
+        BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS,
+                VertexFormats.POSITION_COLOR);
+
+        boolean emitted = false;
+        for (BlockPos pos : region.worldBlocks) {
+            if (cameraPos.squaredDistanceTo(Vec3d.ofCenter(pos)) > maxDistanceSq) {
+                continue;
+            }
+            emitCube(buffer, matrix, pos, cameraPos, alpha, 255, 215, 0);
+            emitted = true;
+        }
+
+        if (!emitted) {
+            return;
+        }
+
+        BuiltBuffer built = buffer.end();
+        RenderLayers.debugQuads().draw(built);
+        built.close();
+    }
+
+
 
     private static List<BlockPos> getLineBlocks(BlockPos start, BlockPos end) {
         List<BlockPos> blocks = new ArrayList<>();
@@ -281,6 +374,162 @@ public abstract class SketchToolBase {
         return blocks;
     }
 
+    private static List<Region> detectRegions(BlueprintSession session) {
+        if (session.getOrigin() == null) {
+            return List.of();
+        }
+
+        Set<PlanePos> wallCells = new HashSet<>();
+        int minU = Integer.MAX_VALUE;
+        int maxU = Integer.MIN_VALUE;
+        int minV = Integer.MAX_VALUE;
+        int maxV = Integer.MIN_VALUE;
+
+        List<BlueprintLine> lines = new ArrayList<>(session.getLines());
+        for (BlueprintLine line : lines) {
+            Vec3d startWorld = BlueprintGeometry.toWorldCoords(line.start(), session.getOrigin());
+            Vec3d endWorld = BlueprintGeometry.toWorldCoords(line.end(), session.getOrigin());
+            BlockPos start = BlockPos.ofFloored(startWorld);
+            BlockPos end = BlockPos.ofFloored(endWorld);
+            for (BlockPos pos : getLineBlocks(start, end)) {
+                PlanePos planePos = worldToPlaneCoords(pos, session.getOrigin());
+                wallCells.add(planePos);
+                minU = Math.min(minU, planePos.u());
+                maxU = Math.max(maxU, planePos.u());
+                minV = Math.min(minV, planePos.v());
+                maxV = Math.max(maxV, planePos.v());
+            }
+        }
+
+        if (wallCells.isEmpty()) {
+            return List.of();
+        }
+
+        minU -= 1;
+        minV -= 1;
+        maxU += 1;
+        maxV += 1;
+
+        Set<PlanePos> visited = new HashSet<>();
+        ArrayDeque<PlanePos> queue = new ArrayDeque<>();
+
+        for (int u = minU; u <= maxU; u++) {
+            enqueueIfOpen(queue, visited, wallCells, new PlanePos(u, minV));
+            enqueueIfOpen(queue, visited, wallCells, new PlanePos(u, maxV));
+        }
+        for (int v = minV; v <= maxV; v++) {
+            enqueueIfOpen(queue, visited, wallCells, new PlanePos(minU, v));
+            enqueueIfOpen(queue, visited, wallCells, new PlanePos(maxU, v));
+        }
+
+        flood(queue, visited, wallCells, minU, maxU, minV, maxV);
+
+        List<Region> regions = new ArrayList<>();
+        for (int u = minU + 1; u <= maxU - 1; u++) {
+            for (int v = minV + 1; v <= maxV - 1; v++) {
+                PlanePos pos = new PlanePos(u, v);
+                if (wallCells.contains(pos) || visited.contains(pos)) {
+                    continue;
+                }
+                Region region = floodRegion(pos, wallCells, visited, session.getOrigin(), minU, maxU, minV, maxV);
+                if (!region.worldBlocks.isEmpty()) {
+                    regions.add(region);
+                }
+            }
+        }
+
+        return regions;
+    }
+
+    private static void enqueueIfOpen(ArrayDeque<PlanePos> queue, Set<PlanePos> visited, Set<PlanePos> walls,
+            PlanePos pos) {
+        if (!walls.contains(pos) && visited.add(pos)) {
+            queue.add(pos);
+        }
+    }
+
+    private static void flood(ArrayDeque<PlanePos> queue, Set<PlanePos> visited, Set<PlanePos> walls,
+            int minU, int maxU, int minV, int maxV) {
+        while (!queue.isEmpty()) {
+            PlanePos current = queue.poll();
+            for (PlanePos next : neighbors(current)) {
+                if (next.u() < minU || next.u() > maxU || next.v() < minV || next.v() > maxV) {
+                    continue;
+                }
+                if (walls.contains(next) || visited.contains(next)) {
+                    continue;
+                }
+                visited.add(next);
+                queue.add(next);
+            }
+        }
+    }
+
+    private static Region floodRegion(PlanePos start, Set<PlanePos> walls, Set<PlanePos> visited,
+            org.solofausto.minecad.blueprint.BlueprintOrigin origin,
+            int minU, int maxU, int minV, int maxV) {
+        ArrayDeque<PlanePos> queue = new ArrayDeque<>();
+        queue.add(start);
+        visited.add(start);
+
+        Set<PlanePos> planeCells = new HashSet<>();
+        List<BlockPos> worldBlocks = new ArrayList<>();
+
+        while (!queue.isEmpty()) {
+            PlanePos current = queue.poll();
+            planeCells.add(current);
+            worldBlocks.add(planeToWorldBlock(current, origin));
+
+            for (PlanePos next : neighbors(current)) {
+                if (next.u() < minU || next.u() > maxU || next.v() < minV || next.v() > maxV) {
+                    continue;
+                }
+                if (walls.contains(next) || visited.contains(next)) {
+                    continue;
+                }
+                visited.add(next);
+                queue.add(next);
+            }
+        }
+
+        return new Region(planeCells, worldBlocks);
+    }
+
+    private static List<PlanePos> neighbors(PlanePos pos) {
+        return List.of(
+                new PlanePos(pos.u() + 1, pos.v()),
+                new PlanePos(pos.u() - 1, pos.v()),
+                new PlanePos(pos.u(), pos.v() + 1),
+                new PlanePos(pos.u(), pos.v() - 1));
+    }
+
+    private static PlanePos worldToPlaneCoords(BlockPos pos, org.solofausto.minecad.blueprint.BlueprintOrigin origin) {
+        BlockPos originPos = origin.blockPos();
+        return switch (origin.face()) {
+            case NORTH, SOUTH -> new PlanePos(pos.getX() - originPos.getX(), pos.getY() - originPos.getY());
+            case EAST, WEST -> new PlanePos(pos.getZ() - originPos.getZ(), pos.getY() - originPos.getY());
+            case UP, DOWN -> new PlanePos(pos.getX() - originPos.getX(), pos.getZ() - originPos.getZ());
+        };
+    }
+
+    private static BlockPos planeToWorldBlock(PlanePos pos, org.solofausto.minecad.blueprint.BlueprintOrigin origin) {
+        BlockPos originPos = origin.blockPos();
+        return switch (origin.face()) {
+            case NORTH -> new BlockPos(originPos.getX() + pos.u(), originPos.getY() + pos.v(), originPos.getZ());
+            case SOUTH -> new BlockPos(originPos.getX() + pos.u(), originPos.getY() + pos.v(), originPos.getZ() + 1);
+            case EAST -> new BlockPos(originPos.getX() + 1, originPos.getY() + pos.v(), originPos.getZ() + pos.u());
+            case WEST -> new BlockPos(originPos.getX(), originPos.getY() + pos.v(), originPos.getZ() + pos.u());
+            case UP -> new BlockPos(originPos.getX() + pos.u(), originPos.getY() + 1, originPos.getZ() + pos.v());
+            case DOWN -> new BlockPos(originPos.getX() + pos.u(), originPos.getY(), originPos.getZ() + pos.v());
+        };
+    }
+
+    private static float blinkFactor() {
+        long time = System.currentTimeMillis();
+        double phase = (time % BLINK_PERIOD_MS) / (double) BLINK_PERIOD_MS;
+        return (float) (0.5 + 0.5 * Math.sin(phase * Math.PI * 2.0));
+    }
+
     private static void emitCube(BufferBuilder buffer, Matrix4f matrix, BlockPos pos, Vec3d cameraPos, int alpha,
             int red, int green, int blue) {
         double x0 = pos.getX() - TARGET_OFFSET;
@@ -313,5 +562,28 @@ public abstract class SketchToolBase {
             return Vec3d.ZERO;
         }
         return client.gameRenderer.getCamera().getCameraPos();
+    }
+
+    private static double getRenderDistanceSq() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.options == null) {
+            return Double.POSITIVE_INFINITY;
+        }
+        int viewDistanceChunks = client.options.getViewDistance().getValue();
+        double maxDistance = viewDistanceChunks * 16.0;
+        return maxDistance * maxDistance;
+    }
+
+    private record PlanePos(int u, int v) {
+    }
+
+    private static final class Region {
+        private final Set<PlanePos> planeCells;
+        private final List<BlockPos> worldBlocks;
+
+        private Region(Set<PlanePos> planeCells, List<BlockPos> worldBlocks) {
+            this.planeCells = planeCells;
+            this.worldBlocks = worldBlocks;
+        }
     }
 }
