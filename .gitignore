@@ -16,7 +16,7 @@ classes/
 
 .settings/
 .vscode/
-bin/*
+bin/
 
 .classpath
 .project
