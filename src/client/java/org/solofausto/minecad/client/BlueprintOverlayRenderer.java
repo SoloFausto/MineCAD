@@ -65,17 +65,22 @@ public final class BlueprintOverlayRenderer {
 
     private static void renderFaceOverlay(WorldRenderContext context, BlueprintOrigin origin) {
         BlockPos pos = origin.blockPos();
-        Direction face = origin.face();
-        Vec3d[] corners = getFaceCorners(pos, face, OVERLAY_OFFSET);
+        Direction planeFace = origin.face();
+        Direction renderFace = (planeFace == Direction.UP || planeFace == Direction.DOWN)
+                ? Direction.DOWN
+                : planeFace;
+        Vec3d[] corners = getFaceCorners(pos, renderFace, OVERLAY_OFFSET);
 
         MatrixStack matrices = context.matrices();
         Vec3d cameraPos = clientCameraPos();
+        if (isBackfaceCulled(pos, renderFace, cameraPos)) {
+            return;
+        }
         Matrix4f matrix = matrices.peek().getPositionMatrix();
         BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS,
                 VertexFormats.POSITION_COLOR);
         int alpha = Math.round(255 * OVERLAY_ALPHA);
         emitQuad(buffer, matrix, corners, cameraPos, alpha);
-        emitQuad(buffer, matrix, new Vec3d[] { corners[3], corners[2], corners[1], corners[0] }, cameraPos, alpha);
 
         BuiltBuffer built = buffer.end();
         RenderLayers.debugQuads().draw(built);
@@ -201,5 +206,27 @@ public final class BlueprintOverlayRenderer {
                     new Vec3d(min, y0 - offset, min)
             };
         };
+    }
+
+    private static boolean isBackfaceCulled(BlockPos pos, Direction face, Vec3d cameraPos) {
+        Vec3d planePoint = switch (face) {
+            case NORTH -> new Vec3d(pos.getX(), pos.getY(), pos.getZ());
+            case SOUTH -> new Vec3d(pos.getX(), pos.getY(), pos.getZ() + 1);
+            case WEST -> new Vec3d(pos.getX(), pos.getY(), pos.getZ());
+            case EAST -> new Vec3d(pos.getX() + 1, pos.getY(), pos.getZ());
+            case DOWN -> new Vec3d(pos.getX(), pos.getY(), pos.getZ());
+            case UP -> new Vec3d(pos.getX(), pos.getY() + 1, pos.getZ());
+        };
+
+        Vec3d normal = switch (face) {
+            case NORTH -> new Vec3d(0, 0, -1);
+            case SOUTH -> new Vec3d(0, 0, 1);
+            case WEST -> new Vec3d(-1, 0, 0);
+            case EAST -> new Vec3d(1, 0, 0);
+            case DOWN -> new Vec3d(0, -1, 0);
+            case UP -> new Vec3d(0, 1, 0);
+        };
+
+        return cameraPos.subtract(planePoint).dotProduct(normal) <= 0.0;
     }
 }

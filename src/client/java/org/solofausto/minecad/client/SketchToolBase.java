@@ -6,12 +6,15 @@ import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BuiltBuffer;
+import net.minecraft.client.render.Frustum;
 import net.minecraft.client.render.RenderLayers;
 import net.minecraft.client.render.Tessellator;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.item.ItemStack;
 import java.util.ArrayDeque;
@@ -23,8 +26,6 @@ import org.joml.Matrix4f;
 import org.solofausto.minecad.blueprint.BlueprintGeometry;
 import org.solofausto.minecad.blueprint.BlueprintItemData;
 import org.solofausto.minecad.blueprint.BlueprintManager;
-import org.solofausto.minecad.blueprint.BlueprintLine;
-import org.solofausto.minecad.blueprint.BlueprintPoint;
 import org.solofausto.minecad.blueprint.BlueprintSession;
 import org.solofausto.minecad.Minecad;
 
@@ -79,12 +80,13 @@ public abstract class SketchToolBase {
         }
 
         double maxDistanceSq = getRenderDistanceSq();
-        renderPoints(context, session, cameraPos, maxDistanceSq);
-        renderLines(context, session, cameraPos, maxDistanceSq);
+        Frustum frustum = context.worldRenderer().getCapturedFrustum();
+        renderPoints(context, session, cameraPos, maxDistanceSq, frustum);
+        renderLines(context, session, cameraPos, maxDistanceSq, frustum);
 
         BlockPos targetPos = BlockPos.ofFloored(hit);
-        renderRegions(context, session, cameraPos, targetPos, maxDistanceSq);
-        renderTargetBlock(context, targetPos, maxDistanceSq);
+        renderRegions(context, session, cameraPos, targetPos, maxDistanceSq, frustum);
+        renderTargetBlock(context, targetPos, maxDistanceSq, frustum);
     }
 
     private static boolean isHoldingSketchTool(MinecraftClient client) {
@@ -143,10 +145,14 @@ public abstract class SketchToolBase {
         return blueprintId.equals(stackId);
     }
 
-    private static void renderTargetBlock(WorldRenderContext context, BlockPos targetPos, double maxDistanceSq) {
+    private static void renderTargetBlock(WorldRenderContext context, BlockPos targetPos, double maxDistanceSq,
+            Frustum frustum) {
         MatrixStack matrices = context.matrices();
         Vec3d cameraPos = clientCameraPos();
         if (cameraPos.squaredDistanceTo(Vec3d.ofCenter(targetPos)) > maxDistanceSq) {
+            return;
+        }
+        if (frustum != null && !frustum.isVisible(new Box(targetPos))) {
             return;
         }
         Matrix4f matrix = matrices.peek().getPositionMatrix();
@@ -172,8 +178,12 @@ public abstract class SketchToolBase {
     }
 
     private static void renderPoints(WorldRenderContext context, BlueprintSession session, Vec3d cameraPos,
-            double maxDistanceSq) {
+            double maxDistanceSq, Frustum frustum) {
         if (session.getPoints().isEmpty()) {
+            return;
+        }
+
+        if (isBackfaceCulled(session.getOrigin(), cameraPos)) {
             return;
         }
 
@@ -184,13 +194,14 @@ public abstract class SketchToolBase {
         int alpha = Math.round(255 * POINT_ALPHA);
         boolean emitted = false;
 
-        List<BlueprintPoint> points = new ArrayList<>(session.getPoints());
-        for (var point : points) {
-            Vec3d world = BlueprintGeometry.toWorldCoords(point, session.getOrigin());
-            if (cameraPos.squaredDistanceTo(world) > maxDistanceSq) {
+        List<BlockPos> points = session.getCachedPointBlocks();
+        for (BlockPos pos : points) {
+            if (cameraPos.squaredDistanceTo(Vec3d.ofCenter(pos)) > maxDistanceSq) {
                 continue;
             }
-            BlockPos pos = BlockPos.ofFloored(world);
+            if (frustum != null && !frustum.isVisible(new Box(pos))) {
+                continue;
+            }
             emitCube(buffer, matrix, pos, cameraPos, alpha, 0, 120, 255);
             emitted = true;
         }
@@ -205,8 +216,12 @@ public abstract class SketchToolBase {
     }
 
     private static void renderLines(WorldRenderContext context, BlueprintSession session, Vec3d cameraPos,
-            double maxDistanceSq) {
+            double maxDistanceSq, Frustum frustum) {
         if (session.getLines().isEmpty()) {
+            return;
+        }
+
+        if (isBackfaceCulled(session.getOrigin(), cameraPos)) {
             return;
         }
 
@@ -217,14 +232,16 @@ public abstract class SketchToolBase {
         int alpha = Math.round(255 * LINE_ALPHA);
         boolean emitted = false;
 
-        List<BlueprintLine> lines = new ArrayList<>(session.getLines());
-        for (BlueprintLine line : lines) {
-            Vec3d startWorld = BlueprintGeometry.toWorldCoords(line.start(), session.getOrigin());
-            Vec3d endWorld = BlueprintGeometry.toWorldCoords(line.end(), session.getOrigin());
-            BlockPos start = BlockPos.ofFloored(startWorld);
-            BlockPos end = BlockPos.ofFloored(endWorld);
-            for (BlockPos pos : getLineBlocks(start, end)) {
+        List<BlueprintSession.LineBlockCache> lines = session.getCachedLineBlocks();
+        for (BlueprintSession.LineBlockCache line : lines) {
+            if (frustum != null && !frustum.isVisible(line.bounds())) {
+                continue;
+            }
+            for (BlockPos pos : line.blocks()) {
                 if (cameraPos.squaredDistanceTo(Vec3d.ofCenter(pos)) > maxDistanceSq) {
+                    continue;
+                }
+                if (frustum != null && !frustum.isVisible(new Box(pos))) {
                     continue;
                 }
                 emitCube(buffer, matrix, pos, cameraPos, alpha, 0, 255, 0);
@@ -242,8 +259,12 @@ public abstract class SketchToolBase {
     }
 
     private static void renderRegions(WorldRenderContext context, BlueprintSession session, Vec3d cameraPos,
-            BlockPos targetPos, double maxDistanceSq) {
+            BlockPos targetPos, double maxDistanceSq, Frustum frustum) {
         if (session.getLines().isEmpty() || session.getOrigin() == null) {
+            return;
+        }
+
+        if (isBackfaceCulled(session.getOrigin(), cameraPos)) {
             return;
         }
 
@@ -268,6 +289,9 @@ public abstract class SketchToolBase {
 
         lastHoveredRegionIndex = hoveredIndex;
         Region region = regions.get(hoveredIndex);
+        if (frustum != null && !frustum.isVisible(region.bounds)) {
+            return;
+        }
         float blink = blinkFactor();
         int alpha = Math.round(255 * REGION_ALPHA * blink);
         if (alpha <= 0) {
@@ -284,6 +308,9 @@ public abstract class SketchToolBase {
             if (cameraPos.squaredDistanceTo(Vec3d.ofCenter(pos)) > maxDistanceSq) {
                 continue;
             }
+            if (frustum != null && !frustum.isVisible(new Box(pos))) {
+                continue;
+            }
             emitCube(buffer, matrix, pos, cameraPos, alpha, 255, 215, 0);
             emitted = true;
         }
@@ -297,83 +324,6 @@ public abstract class SketchToolBase {
         built.close();
     }
 
-
-
-    private static List<BlockPos> getLineBlocks(BlockPos start, BlockPos end) {
-        List<BlockPos> blocks = new ArrayList<>();
-        int x1 = start.getX();
-        int y1 = start.getY();
-        int z1 = start.getZ();
-        int x2 = end.getX();
-        int y2 = end.getY();
-        int z2 = end.getZ();
-
-        int dx = Math.abs(x2 - x1);
-        int dy = Math.abs(y2 - y1);
-        int dz = Math.abs(z2 - z1);
-
-        int xs = x2 > x1 ? 1 : -1;
-        int ys = y2 > y1 ? 1 : -1;
-        int zs = z2 > z1 ? 1 : -1;
-
-        blocks.add(new BlockPos(x1, y1, z1));
-
-        if (dx >= dy && dx >= dz) {
-            int p1 = 2 * dy - dx;
-            int p2 = 2 * dz - dx;
-            while (x1 != x2) {
-                x1 += xs;
-                if (p1 >= 0) {
-                    y1 += ys;
-                    p1 -= 2 * dx;
-                }
-                if (p2 >= 0) {
-                    z1 += zs;
-                    p2 -= 2 * dx;
-                }
-                p1 += 2 * dy;
-                p2 += 2 * dz;
-                blocks.add(new BlockPos(x1, y1, z1));
-            }
-        } else if (dy >= dx && dy >= dz) {
-            int p1 = 2 * dx - dy;
-            int p2 = 2 * dz - dy;
-            while (y1 != y2) {
-                y1 += ys;
-                if (p1 >= 0) {
-                    x1 += xs;
-                    p1 -= 2 * dy;
-                }
-                if (p2 >= 0) {
-                    z1 += zs;
-                    p2 -= 2 * dy;
-                }
-                p1 += 2 * dx;
-                p2 += 2 * dz;
-                blocks.add(new BlockPos(x1, y1, z1));
-            }
-        } else {
-            int p1 = 2 * dy - dz;
-            int p2 = 2 * dx - dz;
-            while (z1 != z2) {
-                z1 += zs;
-                if (p1 >= 0) {
-                    y1 += ys;
-                    p1 -= 2 * dz;
-                }
-                if (p2 >= 0) {
-                    x1 += xs;
-                    p2 -= 2 * dz;
-                }
-                p1 += 2 * dy;
-                p2 += 2 * dx;
-                blocks.add(new BlockPos(x1, y1, z1));
-            }
-        }
-
-        return blocks;
-    }
-
     private static List<Region> detectRegions(BlueprintSession session) {
         if (session.getOrigin() == null) {
             return List.of();
@@ -385,13 +335,9 @@ public abstract class SketchToolBase {
         int minV = Integer.MAX_VALUE;
         int maxV = Integer.MIN_VALUE;
 
-        List<BlueprintLine> lines = new ArrayList<>(session.getLines());
-        for (BlueprintLine line : lines) {
-            Vec3d startWorld = BlueprintGeometry.toWorldCoords(line.start(), session.getOrigin());
-            Vec3d endWorld = BlueprintGeometry.toWorldCoords(line.end(), session.getOrigin());
-            BlockPos start = BlockPos.ofFloored(startWorld);
-            BlockPos end = BlockPos.ofFloored(endWorld);
-            for (BlockPos pos : getLineBlocks(start, end)) {
+        List<BlueprintSession.LineBlockCache> lines = session.getCachedLineBlocks();
+        for (BlueprintSession.LineBlockCache line : lines) {
+            for (BlockPos pos : line.blocks()) {
                 PlanePos planePos = worldToPlaneCoords(pos, session.getOrigin());
                 wallCells.add(planePos);
                 minU = Math.min(minU, planePos.u());
@@ -474,11 +420,24 @@ public abstract class SketchToolBase {
 
         Set<PlanePos> planeCells = new HashSet<>();
         List<BlockPos> worldBlocks = new ArrayList<>();
+        int minX = Integer.MAX_VALUE;
+        int minY = Integer.MAX_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int maxY = Integer.MIN_VALUE;
+        int maxZ = Integer.MIN_VALUE;
 
         while (!queue.isEmpty()) {
             PlanePos current = queue.poll();
             planeCells.add(current);
-            worldBlocks.add(planeToWorldBlock(current, origin));
+            BlockPos worldBlock = planeToWorldBlock(current, origin);
+            worldBlocks.add(worldBlock);
+            minX = Math.min(minX, worldBlock.getX());
+            minY = Math.min(minY, worldBlock.getY());
+            minZ = Math.min(minZ, worldBlock.getZ());
+            maxX = Math.max(maxX, worldBlock.getX());
+            maxY = Math.max(maxY, worldBlock.getY());
+            maxZ = Math.max(maxZ, worldBlock.getZ());
 
             for (PlanePos next : neighbors(current)) {
                 if (next.u() < minU || next.u() > maxU || next.v() < minV || next.v() > maxV) {
@@ -492,7 +451,8 @@ public abstract class SketchToolBase {
             }
         }
 
-        return new Region(planeCells, worldBlocks);
+        Box bounds = new Box(minX, minY, minZ, maxX + 1, maxY + 1, maxZ + 1);
+        return new Region(planeCells, worldBlocks, bounds);
     }
 
     private static List<PlanePos> neighbors(PlanePos pos) {
@@ -556,6 +516,35 @@ public abstract class SketchToolBase {
         emitQuad(buffer, matrix, new Vec3d[] { v000, v100, v101, v001 }, cameraPos, alpha, red, green, blue); // down
     }
 
+    private static boolean isBackfaceCulled(org.solofausto.minecad.blueprint.BlueprintOrigin origin,
+            Vec3d cameraPos) {
+        if (origin == null) {
+            return false;
+        }
+
+        BlockPos pos = origin.blockPos();
+        Direction face = origin.face();
+        Vec3d planePoint = switch (face) {
+            case NORTH -> new Vec3d(pos.getX(), pos.getY(), pos.getZ());
+            case SOUTH -> new Vec3d(pos.getX(), pos.getY(), pos.getZ() + 1);
+            case WEST -> new Vec3d(pos.getX(), pos.getY(), pos.getZ());
+            case EAST -> new Vec3d(pos.getX() + 1, pos.getY(), pos.getZ());
+            case DOWN -> new Vec3d(pos.getX(), pos.getY(), pos.getZ());
+            case UP -> new Vec3d(pos.getX(), pos.getY() + 1, pos.getZ());
+        };
+
+        Vec3d normal = switch (face) {
+            case NORTH -> new Vec3d(0, 0, -1);
+            case SOUTH -> new Vec3d(0, 0, 1);
+            case WEST -> new Vec3d(-1, 0, 0);
+            case EAST -> new Vec3d(1, 0, 0);
+            case DOWN -> new Vec3d(0, -1, 0);
+            case UP -> new Vec3d(0, 1, 0);
+        };
+
+        return cameraPos.subtract(planePoint).dotProduct(normal) <= 0.0;
+    }
+
     private static Vec3d clientCameraPos() {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.gameRenderer == null || client.gameRenderer.getCamera() == null) {
@@ -580,10 +569,12 @@ public abstract class SketchToolBase {
     private static final class Region {
         private final Set<PlanePos> planeCells;
         private final List<BlockPos> worldBlocks;
+        private final Box bounds;
 
-        private Region(Set<PlanePos> planeCells, List<BlockPos> worldBlocks) {
+        private Region(Set<PlanePos> planeCells, List<BlockPos> worldBlocks, Box bounds) {
             this.planeCells = planeCells;
             this.worldBlocks = worldBlocks;
+            this.bounds = bounds;
         }
     }
 }
